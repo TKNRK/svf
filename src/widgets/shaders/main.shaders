@@ -1,0 +1,150 @@
+# vertex shader
+# version 430
+
+uniform mat4 MV;
+uniform mat4 P;
+uniform float N;
+uniform float transparency;
+uniform float th1;
+uniform float th2;
+
+in vec3 pos_vs;
+out vec4 color_vs;
+
+flat out int   vertexID_fs;
+flat out float vertexZ_fs;
+flat out float pointSize;
+
+layout ( std430, binding=5 ) buffer SSB_Flags {
+  readonly int vertexColor[];
+};
+
+layout(std430, binding=7) buffer SSB_isDrawn {
+  readonly int isDrawn[];
+};
+
+layout(std430, binding=8) buffer SSB_Isolation {
+  readonly int isIsolated[];
+};
+
+subroutine void Vertex();
+subroutine uniform Vertex draw;
+
+subroutine (Vertex)
+void draw_vertices() {
+  gl_PointSize = 15;
+  color_vs = vec4(1, 1, 1, 1);
+  // put the filtered vertices behind the others
+  if (isDrawn[gl_VertexID] == 0 || isIsolated[gl_VertexID] == 1) {
+    gl_Position.z = -0.1;
+  }
+}
+
+subroutine (Vertex)
+void draw_edges() {
+  // color_vs = vec4(0.41, 0.59, 0.67, transparency);
+  color_vs = vec4(0, 1, 1, transparency);
+}
+
+void main() {
+  vec4 p = vec4(pos_vs, 1);
+  gl_Position = p;
+  draw();
+  pointSize = gl_PointSize;
+  vertexID_fs = gl_VertexID;
+  // vertexZ_fs = gl_VertexID / N;
+  vertexZ_fs = - pos_vs.z;
+}
+
+# fragment shader
+# version 430
+
+const vec4 colorMap[3] = vec4[3](
+    vec4(1.0, 1.0, 1.0, 0.7),
+    vec4(1.0, 0.0, 0.0, 1.0),
+    vec4(0.0, 0.0, 1.0, 1.0));
+
+layout (origin_upper_left) in vec4 gl_FragCoord;
+flat in int   vertexID_fs;
+flat in float vertexZ_fs;
+flat in float pointSize;
+
+in vec4 color_vs;
+out vec4 color_fb;
+
+layout (std430, binding=0) buffer SSB_Picker {
+  readonly uint  clicked_x, clicked_y;
+  volatile float pick_z;
+  volatile int   pick_lock;
+  volatile int   pick_id;
+};
+
+layout ( std430, binding=5 ) buffer SSB_Flags {
+  readonly int vertexColor[];
+};
+
+layout(std430, binding=6) buffer SSB_Edgelist {
+  readonly uint edges[];
+};
+
+layout(std430, binding=7) buffer SSB_isDrawn {
+  readonly int isDrawn[];
+};
+
+layout(std430, binding=8) buffer SSB_Isolation {
+  readonly int isIsolated[];
+};
+
+const int UNLOCKED = 0, LOCKED = 1;
+
+subroutine void Fragment(float, float);
+subroutine uniform Fragment draw_pick;
+
+subroutine (Fragment)
+void draw_vertices(float D, float d) {
+    vec3 ambient = colorMap[vertexColor[vertexID_fs]].rgb;
+    float diffuse = max(1 - D * D, 0);
+    color_fb = vec4((ambient + diffuse) / 2, 1);
+    if (d >= (pointSize - 1)) discard; //color_fb.a = ((pointSize + 1) - d) / 2;
+    if (isDrawn[vertexID_fs] == 1 && isIsolated[vertexID_fs] == 0){
+      color_fb.a = 1.0;
+    } else {
+      color_fb.a = 0.3;
+    }
+}
+
+subroutine (Fragment)
+void draw_edges(float D, float d) {
+  uint v1 = edges[2 * gl_PrimitiveID];
+  uint v2 = edges[2 * gl_PrimitiveID + 1];
+  if (isDrawn[v1]==1 && isDrawn[v2]==1) {
+    color_fb = color_vs;
+  } else {
+    // color_fb = color_vs * 0.01;
+    color_fb = vec4(0, 0, 0, 0);
+  }
+}
+
+subroutine (Fragment)
+void pick(float D, float d) {
+  if (isDrawn[vertexID_fs] == 1 && isIsolated[vertexID_fs] == 0){
+    if (int(gl_FragCoord.x) != clicked_x) return;
+    if (int(gl_FragCoord.y) != clicked_y) return;
+
+    while (pick_z < vertexZ_fs) {
+      if (atomicCompSwap(pick_lock, UNLOCKED, LOCKED) == UNLOCKED) {
+        pick_z = vertexZ_fs;
+        pick_id = vertexID_fs;
+        pick_lock = UNLOCKED;
+        return;
+      }
+    }
+  }
+}
+
+void main() {
+  vec2 XY = 2.0 * gl_PointCoord.xy - 1.0;
+  vec2 xy = pointSize * XY;
+  float d = length(xy);
+  draw_pick(length(XY), d);
+}
